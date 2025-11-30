@@ -13,8 +13,23 @@ st.title("🏇 配置馬券術 判定アプリ (Mobile Ver)")
 st.write("ExcelまたはCSVファイルをアップロードしてください。")
 
 # ==========================================
-# ロジック関数群 (Tkinter版から移植)
+# ロジック関数群
 # ==========================================
+
+def to_half_width(text):
+    """全角数字を半角数字に変換し、数字以外の文字を除去する"""
+    if pd.isna(text): return text
+    text = str(text)
+    
+    # 1. 全角数字を半角に変換
+    table = str.maketrans('０１２３４５６７８９', '0123456789')
+    text = text.translate(table)
+    
+    # 2. 数字とドット以外を除去 (例: "11R" -> "11", "第1レース" -> "1")
+    # 小数点(単オッズなど)も考慮してドットは残す
+    text = re.sub(r'[^\d\.]', '', text)
+    
+    return text
 
 def normalize_name(x):
     if pd.isna(x): return ''
@@ -37,20 +52,31 @@ def load_and_clean_data(file_obj, filename, sheet_name=None):
         else:
             df = pd.read_excel(file_obj, engine='openpyxl')
 
-    # 列名のクリーニング
+    # 列名のクリーニング (空白除去)
     df.columns = df.columns.str.strip()
-    rename_map = {'場所': '場名', '単オッズ': '単ｵｯｽﾞ', '調教師': '厩舎'}
+    
+    # ★ヘッダー名のゆらぎ吸収 (全角R、レース表記など)
+    rename_map = {
+        '場所': '場名', 
+        '単オッズ': '単ｵｯｽﾞ', 
+        '調教師': '厩舎', 
+        'レース': 'R',
+        'Ｒ': 'R'  # 全角Rに対応
+    }
     df = df.rename(columns=rename_map)
 
     if '場名' not in df.columns: df['場名'] = 'Unknown'
     
-    # Rと正番の数値化
-    df = df[df['R'].astype(str).str.isnumeric() & df['R'].notna()]
-    numeric_cols = ['R', '正番', '単ｵｯｽﾞ', '逆番', '正循環', '逆循環', '頭数']
-    for col in numeric_cols:
+    # ★数値列の全角・半角統一とクリーニング
+    target_numeric_cols = ['R', '正番', '単ｵｯｽﾞ', '逆番', '正循環', '逆循環', '頭数']
+    for col in target_numeric_cols:
         if col in df.columns:
+            # 全角->半角変換 & 余計な文字削除
+            df[col] = df[col].apply(to_half_width)
+            # 数値化 (変換できないものはNaNに)
             df[col] = pd.to_numeric(df[col], errors='coerce')
-        
+    
+    # Rと正番が有効な行だけ残す
     df = df.dropna(subset=['R', '正番'])
     df['R'] = df['R'].astype(int)
     df['正番'] = df['正番'].astype(int)
@@ -243,7 +269,6 @@ def evaluate_and_score(df_pairs: pd.DataFrame, df_original_data: pd.DataFrame) -
 uploaded_file = st.file_uploader("", type=['xlsx', 'xlsm', 'csv'])
 
 if uploaded_file is not None:
-    # Excelの場合、シート選択を表示
     sheet_name = None
     if uploaded_file.name.endswith(('.xlsx', '.xlsm')):
         try:
@@ -256,14 +281,10 @@ if uploaded_file is not None:
         except Exception as e:
             st.error(f"Excel読み込みエラー: {e}")
 
-    # 実行ボタン
     if st.button('判定実行'):
         with st.spinner('分析中...'):
             try:
-                # データ処理
-                # ファイルポインタを先頭に戻す(ExcelFileなどで読んだ場合のため)
                 uploaded_file.seek(0)
-                
                 df_all = load_and_clean_data(uploaded_file, uploaded_file.name, sheet_name)
                 
                 if df_all.empty:
@@ -275,7 +296,6 @@ if uploaded_file is not None:
                     df_blue = get_blue_recommendations(df_calculated)
                     df_ar = evaluate_and_score(df_all_pairs, df_all)
                     
-                    # 結合
                     if not df_blue.empty:
                         df_blue = df_blue.rename(columns={'対象名': '騎手/厩舎/馬主'})
                         df_blue = df_blue.assign(**{'騎手/厩舎/馬主': lambda x: x['属性'] + ':' + x['騎手/厩舎/馬主']}).drop(columns=['属性'])
@@ -286,7 +306,7 @@ if uploaded_file is not None:
                     if df_final.empty:
                         st.info("推奨馬は見つかりませんでした。")
                     else:
-                        # 重複まとめ & スコア加算
+                        # 重複まとめ
                         df_final = df_final.sort_values('重要度', ascending=False)
                         agg_rules = {
                             '騎手/厩舎/馬主': lambda x: ' + '.join(sorted(set(x))), 
@@ -299,12 +319,10 @@ if uploaded_file is not None:
                         # ソート: 場名 > レース > 重要度
                         df_final = df_final.sort_values(['場名', 'R', '重要度'], ascending=[True, True, False])
 
-                        # 結果表示 (スマホで見やすいようにDataFrame表示)
                         st.success("分析完了！")
                         
                         cols = ['場名', 'R', '馬名', '騎手/厩舎/馬主', '単ｵｯｽﾞ', '判定', '条件']
                         
-                        # Excelダウンロードボタンの作成
                         buffer = io.BytesIO()
                         with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
                             df_final.to_excel(writer, index=False, sheet_name='結果')
@@ -315,8 +333,6 @@ if uploaded_file is not None:
                             file_name="result.xlsx",
                             mime="application/vnd.ms-excel"
                         )
-
-                        # 画面表示
                         st.dataframe(df_final[cols], hide_index=True, use_container_width=True)
 
             except Exception as e:
